@@ -70,6 +70,40 @@ jobs:
       id-token: write
 
     steps:
+      - name: Diagnose GitHub OIDC Claims
+        shell: bash
+        env:
+          ACTIONS_ID_TOKEN_REQUEST_URL: ${{ env.ACTIONS_ID_TOKEN_REQUEST_URL }}
+          ACTIONS_ID_TOKEN_REQUEST_TOKEN: ${{ env.ACTIONS_ID_TOKEN_REQUEST_TOKEN }}
+        run: |
+          set -euo pipefail
+
+          if [[ -z "${ACTIONS_ID_TOKEN_REQUEST_URL:-}" || -z "${ACTIONS_ID_TOKEN_REQUEST_TOKEN:-}" ]]; then
+            echo "GitHub OIDC request environment variables are unavailable."
+            exit 1
+          fi
+
+          RESPONSE=$(curl -fsS \
+            -H "Authorization: Bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
+            -H "Accept: application/json" \
+            "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=sts.amazonaws.com")
+
+          TOKEN=$(jq -er '.value' <<< "$RESPONSE")
+
+          PAYLOAD=$(printf '%s' "$TOKEN" | cut -d '.' -f 2 | tr '_-' '/+')
+          PADDING=$(( (4 - ${#PAYLOAD} % 4) % 4 ))
+          PAYLOAD="${PAYLOAD}$(printf '%*s' "$PADDING" '' | tr ' ' '=')"
+
+          printf '%s' "$PAYLOAD" | base64 -d | jq '{
+            iss: .iss,
+            aud: .aud,
+            sub: .sub,
+            repository: .repository,
+            ref: .ref
+          }'
+
+          unset TOKEN RESPONSE PAYLOAD
+
       - name: Configure AWS Credentials using OIDC
         uses: aws-actions/configure-aws-credentials@v4
         with:
@@ -80,10 +114,10 @@ jobs:
         run: aws sts get-caller-identity
 
       - name: Deploy Application through Systems Manager
+        shell: bash
         env:
           INSTANCE_ID: ${{ vars.EC2_INSTANCE_ID }}
           DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
-        shell: bash
         run: |
           set -euo pipefail
 
